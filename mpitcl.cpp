@@ -418,6 +418,7 @@ int main(int argc, char** argv)
  */
 static int initInteractive(Tcl_Interp* pRawInterpreter)
 {
+  Tcl_Init(pRawInterpreter);
   CTCLInterpreter* pInterp = new CTCLInterpreter(pRawInterpreter);
   loadMPIExtensions(*pInterp);
 
