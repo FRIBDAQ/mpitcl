@@ -4,6 +4,7 @@
 #include <TCLObjectProcessor.h>
 #include <TCLObject.h>
 #include <Exception.h>
+#include <TCLLiveEventLoop.h>
 
 #include <stdlib.h>
 #include <iostream>
@@ -12,10 +13,7 @@
 #include "mpitcl.h"
 
 static Tcl_AppInitProc initInteractive;
-static const int MPI_TAG_SCRIPT(1);                    // Tag for sending a script.
-static const int MPI_TAG_TCLDATA(2);                   // Tag for sending Tcl encoded data.
-static const int MPI_TAG_BINDATA(3);                   // Tag for sending Binary data.
-
+static void startMpiReceiverThread(CTCLInterpreter& interp, Tcl_ThreadId mainThread);
 
 /**
  * MPI extension class.
@@ -313,6 +311,51 @@ MPITcl_setBinaryDataHandler(MPIBinDataHandler handler)
   gpBinaryDataHandler = handler;
 }
 
+/**
+ * mpiEventProcessor
+ *   Called to process an MPI event.
+ *   @param interp - references the TCL interpeter we're running.
+ *   @param probeStat - references probe status that caused this to be
+ *                      called.
+ */
+void
+mpiEventProcessor(CTCLInterpreter& interp, MPI_Status& probeStat)
+{
+  int tag = probeStat.MPI_TAG;             // Type of message.
+  int        count;
+
+  MPI_Get_count(&probeStat, MPI_CHAR, &count);
+  
+  char msg[count];          // For now stack allocate.
+  
+  MPI_Recv(msg, count, MPI_CHAR, probeStat.MPI_SOURCE, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+  
+  switch(tag) {
+  case MPI_TAG_SCRIPT:
+    {
+      interp.GlobalEval(msg);
+      break;
+    }
+  case MPI_TAG_TCLDATA:
+    if (gpMpiCommand->m_pDataHandler) {
+      CTCLObject fullCommand;
+      fullCommand.Bind(interp);
+      fullCommand += *gpMpiCommand->m_pDataHandler;   // base command.
+      fullCommand += probeStat.MPI_SOURCE;
+	fullCommand += msg;
+	fullCommand();
+    }
+    break;
+  case MPI_TAG_BINDATA:
+    if (gpBinaryDataHandler) {
+      (*gpBinaryDataHandler)(probeStat.MPI_SOURCE, count, msg);
+    }
+    break;
+  default:
+    std::cerr << "Unrecognized MPI tag type : " << tag << " message ignored\n";
+  }
+}
+
 
 /**
  * Main loop of non rank 0  processes
@@ -326,44 +369,12 @@ MPITcl_setBinaryDataHandler(MPIBinDataHandler handler)
 void childMainLoop(CTCLInterpreter& interp)
 {
   MPI_Status probeStat;
-  int        count;
   int        myrank;  
-  MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 
   
   while(1) {			// Exit will be done by tcl command e.g.
     MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,  &probeStat);
-    int tag = probeStat.MPI_TAG;             // Type of message.
-    MPI_Get_count(&probeStat, MPI_CHAR, &count);
-
-    char msg[count];          // For now stack allocate.
-
-    MPI_Recv(msg, count, MPI_CHAR, probeStat.MPI_SOURCE, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-
-    switch(tag) {
-    case MPI_TAG_SCRIPT:
-      {
-	interp.GlobalEval(msg);
-	break;
-      }
-    case MPI_TAG_TCLDATA:
-      if (gpMpiCommand->m_pDataHandler) {
-	CTCLObject fullCommand;
-	fullCommand.Bind(interp);
-	fullCommand += *gpMpiCommand->m_pDataHandler;   // base command.
-	fullCommand += probeStat.MPI_SOURCE;
-	fullCommand += msg;
-	fullCommand();
-      }
-      break;
-    case MPI_TAG_BINDATA:
-      if (gpBinaryDataHandler) {
-	(*gpBinaryDataHandler)(probeStat.MPI_SOURCE, count, msg);
-      }
-      break;
-    default:
-      std::cerr << "Unrecognized MPI tag type : " << tag << " message ignored\n";
-    }
+    mpiEventProcessor(interp, probeStat);
   }
 }
 
@@ -373,8 +384,69 @@ static void finalize(ClientData d)
   exit((long int)d);
 }
 
-static void startMpiReceiverThread()
+struct mpiThreadData {
+  Tcl_ThreadId     s_mainId;
+  CTCLInterpreter* s_pInterp;
+};
+
+struct mpiEvent {
+  Tcl_Event        s_event;
+  CTCLInterpreter* s_pInterp;
+  MPI_Status       s_status;
+};
+
+
+int mpiEventHandler(Tcl_Event* pRawEvent, int flags)
 {
+  mpiEvent* pEvent = reinterpret_cast<mpiEvent*>(pRawEvent);
+  mpiEventProcessor(*pEvent->s_pInterp, pEvent->s_status);
+  startMpiReceiverThread(*pEvent->s_pInterp, Tcl_GetCurrentThread());   // Restart the receiver thread.
+
+  return 1;
+}
+
+void mpiProbeThread(ClientData p)
+{
+  mpiThreadData* pData = static_cast<mpiThreadData*>(p);
+  
+  struct mpiEvent e;			//  Template event.
+  e.s_event.proc   = mpiEventHandler;
+  e.s_event.nextPtr= nullptr;
+  e.s_pInterp      = pData->s_pInterp;
+
+  
+  MPI_Status probeStat;
+  MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,  &probeStat);
+  struct mpiEvent* pEvent =
+    reinterpret_cast<struct mpiEvent*>(Tcl_Alloc(sizeof(mpiEvent)));
+  memcpy(pEvent, &e, sizeof(struct mpiEvent));
+  pEvent->s_status = probeStat;
+  
+  Tcl_ThreadQueueEvent(
+      pData->s_mainId, reinterpret_cast<Tcl_Event*>(pEvent), TCL_QUEUE_TAIL
+  );
+}
+
+/**
+ * startMpiReceiverThread
+ *   Starts the thread that probes for mpi data available.
+ * 
+ * @param interp - references the interpreter of this thread -- I think
+ *                 this can be ignored.
+ * @param mainThread - thread to which events are queues.
+ */
+static void startMpiReceiverThread(CTCLInterpreter& interp, Tcl_ThreadId mainThread)
+{
+  
+  mpiThreadData* pThreadData = new mpiThreadData;
+  pThreadData->s_mainId = mainThread;
+  pThreadData->s_pInterp = &interp;
+  
+  Tcl_ThreadId child;
+  Tcl_CreateThread(
+     &child, mpiProbeThread, reinterpret_cast<ClientData>(pThreadData),
+     TCL_THREAD_STACK_DEFAULT, TCL_THREAD_NOFLAGS
+   );
 }
 
 /**
@@ -423,8 +495,13 @@ static int initInteractive(Tcl_Interp* pRawInterpreter)
   loadMPIExtensions(*pInterp);
 
   Tcl_SetExitProc(finalize);
-  startMpiReceiverThread();
+  startMpiReceiverThread(*pInterp, Tcl_GetCurrentThread());
 
+  // Now run an event loop:
+
+  CTCLLiveEventLoop* pEventLoop =  CTCLLiveEventLoop::getInstance();
+  pEventLoop->start(pInterp);
+  
   return TCL_OK;
 }
 
