@@ -220,7 +220,6 @@ CTclMpi::handle(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
     } else {
       // Set the data handler script -- creating the object if needed.
       
-      std::cerr << "Adding a handler: " << std::string(objv[2]);
       if (m_pDataHandler == nullptr) {
         m_pDataHandler = new CTCLObject;
         m_pDataHandler->Bind(interp);
@@ -386,21 +385,17 @@ mpiEventProcessor(CTCLInterpreter& interp, MPI_Status& probeStat)
     {
       int myrank;
       MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
-      std::cerr << myrank << " Executing " << msg << std::endl;
       interp.GlobalEval(msg);
       break;
     }
   case MPI_TAG_TCLDATA:
-    std::cerr << " Got Tcl data " << msg << std::endl;
     if (gpMpiCommand->m_pDataHandler) {
       CTCLObject fullCommand;
       fullCommand.Bind(interp);
       fullCommand = *gpMpiCommand->m_pDataHandler;   // base command.
       fullCommand += probeStat.MPI_SOURCE;
       fullCommand += msg;
-      std::cerr << "Got TCl data executing: " << std::string(fullCommand) << std::endl;
       std::string result = interp.GlobalEval(std::string(fullCommand));
-      std::cerr << "Result of command: " << std::string(result) << std::endl;
     }
     break;
   case MPI_TAG_BINDATA:
@@ -459,7 +454,6 @@ struct mpiEvent {
 
 int mpiEventHandler(Tcl_Event* pRawEvent, int flags)
 {
-  std::cerr << "Got an event from the thread\n";
   mpiEvent* pEvent = reinterpret_cast<mpiEvent*>(pRawEvent);
   mpiEventProcessor(*pEvent->s_pInterp, pEvent->s_status);
   startMpiReceiverThread(*pEvent->s_pInterp, Tcl_GetCurrentThread());   // Restart the receiver thread.
@@ -469,7 +463,6 @@ int mpiEventHandler(Tcl_Event* pRawEvent, int flags)
 
 void mpiProbeThread(ClientData p)
 {
-  std::cerr << "Probe thread\n";
   mpiThreadData* pData = static_cast<mpiThreadData*>(p);
   
   struct mpiEvent e;			//  Template event.
@@ -488,11 +481,8 @@ void mpiProbeThread(ClientData p)
       MPI_COMM_WORLD, MPI_STATUS_IGNORE
     );
     delete pData;
-    std::cerr << " Probe thread exiting!!\n";
     return;
   }
-  std::cerr << "Queueing an event from " << probeStat.MPI_SOURCE
-    << " to " << std::hex << pData->s_mainId << std::dec << std::endl;
   struct mpiEvent* pEvent =
     reinterpret_cast<struct mpiEvent*>(Tcl_Alloc(sizeof(mpiEvent)));
   memcpy(pEvent, &e, sizeof(struct mpiEvent));
@@ -574,7 +564,6 @@ static int initInteractive(Tcl_Interp* pRawInterpreter)
   loadMPIExtensions(*pInterp);
 
   Tcl_SetExitProc(finalize);
-  std::cerr << "Main thread is: " << std::hex << Tcl_GetCurrentThread() << std::dec << std::endl;
   startMpiReceiverThread(*pInterp, Tcl_GetCurrentThread());
 
   // Now run an event loop:

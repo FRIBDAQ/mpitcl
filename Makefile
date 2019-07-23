@@ -35,8 +35,10 @@ install:
 	install -d $(PREFIX)
 	install -d $(PREFIX)/bin
 	install -d $(PREFIX)/TclLibs
+	install -d $(PREFIX)/include
 	install -m 0755 mpitcl $(PREFIX)/bin
 	install -m 0755 libMpiSpectcl.so pkgIndex.tcl $(PREFIX)/TclLibs
+	install -m 0644 mpitcl.h $(PREFIX)/include
 
 
 
