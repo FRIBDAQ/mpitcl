@@ -42,6 +42,8 @@ protected:
   void execute(CTCLInterpreter& interp, std::vector<CTCLObject>& objv);
   void send(CTCLInterpreter& interp, std::vector<CTCLObject>& objv);
   void handle(CTCLInterpreter& interp, std::vector<CTCLObject>& objv);
+  void stopNotifier(CTCLInterpreter& interp, std::vector<CTCLObject>& objv);
+  void startNotifier(CTCLInterpreter& interp, std::vector<CTCLObject>& objv);
 private:
   void executeScript(int rank, const std::string&  script) {
     MPI_Send(
@@ -124,15 +126,15 @@ CTclMpi::execute(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
   if (rank == "all") {
     for (int i =0; i < s; i++) {
       if (i != r) {
-	executeScript(i, script);
+        executeScript(i, script);
       }
     }
     interp.GlobalEval(script);	//  we're always last so e.g. exit works.
   } else if (rank == "others") {
       for (int i =0; i < s; i++) {
-	if (i != r) {
-	  executeScript(i, script);
-	}
+        if (i != r) {
+          executeScript(i, script);
+        }
       }
   } else {
       // Rank must be a numeric rank < s.
@@ -140,9 +142,9 @@ CTclMpi::execute(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
     int receiver = objv[2];
     if ((receiver < s) && (receiver >= 0)) {
       if (receiver != r) {
-	executeScript(receiver, script);
+        executeScript(receiver, script);
       } else {
-	interp.GlobalEval(script);
+        interp.GlobalEval(script);
       }
     } else {
       throw std::string("Invalid rank for execute");
@@ -170,7 +172,7 @@ CTclMpi::send(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
   if (sRank == "others") {
     for (int i =0; i < appsize(); i++) {
       if (i != myrank()) {
-	sendData(i, data);
+        sendData(i, data);
       }
     }
   } else if (sRank == "all") {
@@ -218,9 +220,10 @@ CTclMpi::handle(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
     } else {
       // Set the data handler script -- creating the object if needed.
       
+      std::cerr << "Adding a handler: " << std::string(objv[2]);
       if (m_pDataHandler == nullptr) {
-	m_pDataHandler = new CTCLObject;
-	m_pDataHandler->Bind(interp);
+        m_pDataHandler = new CTCLObject;
+        m_pDataHandler->Bind(interp);
       }
       
       (*m_pDataHandler) = objv[2].getObject();
@@ -236,10 +239,54 @@ CTclMpi::CTclMpi(const char* command, CTCLInterpreter& interp) :
   CTCLObjectProcessor(interp, command, true), m_pDataHandler(nullptr)
 {
 }
-
+/**
+ * stopNotifier
+ *    Only legal for rank 0 - stop the notifier thread.  This is done
+ *    by sending ourselves a zer length message with MPI_TAG_STOPTHREAD.
+ *    On receipt of this, the probe thread exits.
+ *
+ * @param interp -  interpreter running the thread.
+ * @param objv   -  command parameters (none but the command word).
+ * @note An error is signalled if this is called in a non rank0 process.
+ * @note Calling this method when there is no notifier thread will result in
+ *      an handled message with the MPI_TAG_STOPTHREAD tag and zero length
+ *      queued to RANK 0 --  in general this is not desirable.
+ * @note - If for some reason (see startNotifier) more than one notifier thread
+ *         is running, this method will only stop one of them.  It's also possible
+ *         in that case for MPI_Recv to block in one or all of the other notifier
+ *         threads -- in other words; Dont't. Do. It.
+ */
+void
+CTclMpi::stopNotifier(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
+{
+  requireExactly(objv, 2);
+  if (myrank() != 0) {
+    throw std::string("stopnotifier can only be used in rank 0");
+  }
+  char buf='0';
+  MPI_Send(&buf, 0, MPI_CHAR, 0, MPI_TAG_STOPTHREAD, MPI_COMM_WORLD);
+}
+/**
+ * startNotifier
+ *    Starts the notifier thread.  This is only legal in rank 0 processes.
+ *    See  the notes in stopNotifier for som eof the pitfalls to avoid.
+ *
+ *  @param interp -the interpreter executing the command.
+ *  @param objv   - The command parametesrs.
+ */
+void
+CTclMpi::startNotifier(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
+{
+  requireExactly(objv, 2);
+  if (myrank() != 0) {
+    throw std::string("startnotifier can only be used in rank 0");
+  }
+  startMpiReceiverThread(interp, Tcl_GetCurrentThread());
+  
+}
 /**
  * operator()
- *   Executes the command.
+ *   Executes the mpi::mpi command.
  */
 int
 CTclMpi::operator()(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
@@ -259,6 +306,10 @@ CTclMpi::operator()(CTCLInterpreter& interp, std::vector<CTCLObject>& objv)
       send(interp, objv);
     } else if (subcommand == "handle") {
       handle(interp, objv);
+    } else if (subcommand == "stopnotifier") {
+      stopNotifier(interp, objv);
+    } else if (subcommand == "startnotifier") {
+      startNotifier(interp, objv);
     } else {
       std::string msg = "Unrecognized subcommand: ";
       msg += std::string(objv[0]);
@@ -333,17 +384,23 @@ mpiEventProcessor(CTCLInterpreter& interp, MPI_Status& probeStat)
   switch(tag) {
   case MPI_TAG_SCRIPT:
     {
+      int myrank;
+      MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+      std::cerr << myrank << " Executing " << msg << std::endl;
       interp.GlobalEval(msg);
       break;
     }
   case MPI_TAG_TCLDATA:
+    std::cerr << " Got Tcl data " << msg << std::endl;
     if (gpMpiCommand->m_pDataHandler) {
       CTCLObject fullCommand;
       fullCommand.Bind(interp);
-      fullCommand += *gpMpiCommand->m_pDataHandler;   // base command.
+      fullCommand = *gpMpiCommand->m_pDataHandler;   // base command.
       fullCommand += probeStat.MPI_SOURCE;
-	fullCommand += msg;
-	fullCommand();
+      fullCommand += msg;
+      std::cerr << "Got TCl data executing: " << std::string(fullCommand) << std::endl;
+      std::string result = interp.GlobalEval(std::string(fullCommand));
+      std::cerr << "Result of command: " << std::string(result) << std::endl;
     }
     break;
   case MPI_TAG_BINDATA:
@@ -370,11 +427,15 @@ void childMainLoop(CTCLInterpreter& interp)
 {
   MPI_Status probeStat;
   int        myrank;  
-
+  MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+  try {
   
-  while(1) {			// Exit will be done by tcl command e.g.
-    MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,  &probeStat);
-    mpiEventProcessor(interp, probeStat);
+    while(1) {			// Exit will be done by tcl command e.g.
+      MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,  &probeStat);
+      mpiEventProcessor(interp, probeStat);
+    }
+  } catch (CException& e) {
+    std::cerr << myrank << " Exception: " << e.ReasonText() << std::endl;
   }
 }
 
@@ -398,6 +459,7 @@ struct mpiEvent {
 
 int mpiEventHandler(Tcl_Event* pRawEvent, int flags)
 {
+  std::cerr << "Got an event from the thread\n";
   mpiEvent* pEvent = reinterpret_cast<mpiEvent*>(pRawEvent);
   mpiEventProcessor(*pEvent->s_pInterp, pEvent->s_status);
   startMpiReceiverThread(*pEvent->s_pInterp, Tcl_GetCurrentThread());   // Restart the receiver thread.
@@ -407,6 +469,7 @@ int mpiEventHandler(Tcl_Event* pRawEvent, int flags)
 
 void mpiProbeThread(ClientData p)
 {
+  std::cerr << "Probe thread\n";
   mpiThreadData* pData = static_cast<mpiThreadData*>(p);
   
   struct mpiEvent e;			//  Template event.
@@ -417,14 +480,30 @@ void mpiProbeThread(ClientData p)
   
   MPI_Status probeStat;
   MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,  &probeStat);
+  if (probeStat.MPI_TAG  == MPI_TAG_STOPTHREAD) {      // Being asked to exit.
+    char buf[1];
+    int  count;
+    MPI_Recv(                                           // Recv the token msg.
+      buf, count, MPI_CHAR, probeStat.MPI_SOURCE, probeStat.MPI_TAG,
+      MPI_COMM_WORLD, MPI_STATUS_IGNORE
+    );
+    delete pData;
+    std::cerr << " Probe thread exiting!!\n";
+    return;
+  }
+  std::cerr << "Queueing an event from " << probeStat.MPI_SOURCE
+    << " to " << std::hex << pData->s_mainId << std::dec << std::endl;
   struct mpiEvent* pEvent =
     reinterpret_cast<struct mpiEvent*>(Tcl_Alloc(sizeof(mpiEvent)));
   memcpy(pEvent, &e, sizeof(struct mpiEvent));
   pEvent->s_status = probeStat;
   
+
   Tcl_ThreadQueueEvent(
       pData->s_mainId, reinterpret_cast<Tcl_Event*>(pEvent), TCL_QUEUE_TAIL
   );
+  Tcl_ThreadAlert(pData->s_mainId);
+  delete pData;
 }
 
 /**
@@ -495,12 +574,13 @@ static int initInteractive(Tcl_Interp* pRawInterpreter)
   loadMPIExtensions(*pInterp);
 
   Tcl_SetExitProc(finalize);
+  std::cerr << "Main thread is: " << std::hex << Tcl_GetCurrentThread() << std::dec << std::endl;
   startMpiReceiverThread(*pInterp, Tcl_GetCurrentThread());
 
   // Now run an event loop:
 
-  CTCLLiveEventLoop* pEventLoop =  CTCLLiveEventLoop::getInstance();
-  pEventLoop->start(pInterp);
+  //CTCLLiveEventLoop* pEventLoop =  CTCLLiveEventLoop::getInstance();
+  //pEventLoop->start(pInterp);
   
   return TCL_OK;
 }
