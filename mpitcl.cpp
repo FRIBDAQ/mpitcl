@@ -437,7 +437,6 @@ void childMainLoop(CTCLInterpreter& interp)
 static void finalize(ClientData d)
 {
   MPI_Finalize();
-  exit((long int)d);
 }
 
 struct mpiThreadData {
@@ -544,7 +543,7 @@ int main(int argc, char** argv)
   } else {
     CTCLInterpreter interp;                     // Make a new interp.
     Tcl_Init(interp.getInterpreter());          // Init the interpreter. as well.
-    Tcl_SetExitProc(finalize);
+    Tcl_CreateExitHandler(finalize, nullptr);
     loadMPIExtensions(interp);
     childMainLoop(interp);
   }
