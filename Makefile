@@ -3,7 +3,7 @@
 #   at a specific DAQ root and SpecTcl root dir.
 #
 
-SPECTCLROOT=/usr/opt/spectcl/5.2
+SPECTCLROOT=/usr/opt/spectcl/5.2-001
 SPECLIB=$(SPECTCLROOT)/lib
 SPECINC=-I$(SPECTCLROOT)/include
 

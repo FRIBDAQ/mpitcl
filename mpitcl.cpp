@@ -562,7 +562,7 @@ static int initInteractive(Tcl_Interp* pRawInterpreter)
   CTCLInterpreter* pInterp = new CTCLInterpreter(pRawInterpreter);
   loadMPIExtensions(*pInterp);
 
-  Tcl_SetExitProc(finalize);
+  Tcl_CreateExitHandler(finalize, nullptr);
   startMpiReceiverThread(*pInterp, Tcl_GetCurrentThread());
 
   // Now run an event loop:
