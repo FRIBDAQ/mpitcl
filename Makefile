@@ -3,7 +3,7 @@
 #   at a specific DAQ root and SpecTcl root dir.
 #
 
-SPECTCLROOT=/usr/opt/spectcl/5.2
+SPECTCLROOT=/usr/opt/spectcl/5.3-003
 SPECLIB=$(SPECTCLROOT)/lib
 SPECINC=-I$(SPECTCLROOT)/include
 
@@ -11,7 +11,7 @@ ROOTCXXFLAGS=$(shell $(ROOTSYS)/bin/root-config --cflags)
 ROOTLDFLAGS=$(shell $(ROOTSYS)/bin/root-config --libs)
 
 TCLCXXFLAGS=-I/usr/include/tcl8.6
-TCLLDFLAGS=-ltcl
+TCLLDFLAGS=-ltcl8.6
 
 CXX=mpiCC
 
@@ -19,8 +19,8 @@ all:   mpitcl libMpiSpectcl.so
 
 mpitcl: mpitcl.cpp
 	 $(CXX) -g  -o mpitcl mpitcl.cpp -I/usr/include/tcl8.6 \
-	-I$(DAQINC) -L$(DAQLIB) -ltclPlus -lException -Wl,-rpath=$(DAQLIB) \
-	-ltcl  -std=c++11
+	$(SPECINC) -I$(DAQINC) -L$(DAQLIB) $(ROOTCXXFLAGS) -ltclPlus -lException -Wl,-rpath=$(DAQLIB) \
+	$(TCLLDFLAGS) -std=c++11 $(ROOTLDFLAGS)
 
 
 libMpiSpectcl.so: mpiSpecTclPackage.cpp
