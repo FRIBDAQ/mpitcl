@@ -2,8 +2,11 @@
 #   Assumes DAQ Env vars have been setup  and SPECTCL_HOME are defined to point
 #   at a specific DAQ root and SpecTcl root dir.
 #
+# Building requires that SPECTCLROOT be defines as an env var or on the
+# make line to specify the SpecTcl we build against.
 
-SPECTCLROOT=/usr/opt/spectcl/5.3-003
+#SPECTCLROOT=/usr/opt/spectcl/5.3-003
+
 SPECLIB=$(SPECTCLROOT)/lib
 SPECINC=-I$(SPECTCLROOT)/include
 
